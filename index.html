@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Kamera HP ke OBS</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  :root{
+    --bg:#0d0f14; --panel:#171a22; --accent:#4f8cff; --accent2:#2ecc71;
+    --danger:#ff4f5e; --text:#e8ecf5; --muted:#8b93a7;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    height:100%;overflow:hidden;}
+  #app{height:100%;display:flex;flex-direction:column;}
+
+  /* --- Pilihan mode --- */
+  #modeSelect{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:100%;gap:20px;padding:24px;text-align:center;}
+  #modeSelect h1{font-size:20px;margin:0 0 4px;}
+  #modeSelect p{color:var(--muted);font-size:14px;margin:0 0 16px;max-width:340px;}
+  .bigbtn{width:100%;max-width:320px;padding:18px;border:none;border-radius:14px;
+    font-size:17px;font-weight:600;color:#fff;cursor:pointer;}
+  .btn-send{background:var(--accent);}
+  .btn-recv{background:var(--accent2);}
+
+  /* --- View umum --- */
+  .view{display:flex;flex-direction:column;height:100%;}
+  .hidden{display:none !important;}
+  .topbar{padding:10px 14px;background:var(--panel);display:flex;align-items:center;
+    justify-content:space-between;gap:8px;font-size:13px;}
+  .topbar b{font-weight:600;}
+  .status{color:var(--muted);}
+  .status.ok{color:var(--accent2);}
+  .status.err{color:var(--danger);}
+
+  .form{padding:16px;display:flex;flex-direction:column;gap:10px;}
+  .form input{padding:14px;border-radius:10px;border:1px solid #2a2f3d;background:#11141b;
+    color:var(--text);font-size:15px;}
+  .form button{padding:14px;border-radius:10px;border:none;background:var(--accent);
+    color:#fff;font-size:15px;font-weight:600;cursor:pointer;}
+  .form button.secondary{background:#2a2f3d;}
+
+  video{width:100%;height:100%;object-fit:cover;background:#000;}
+  #senderPreviewWrap{flex:1;position:relative;background:#000;}
+  #senderVideo{width:100%;height:100%;object-fit:cover;}
+  .controls{position:absolute;bottom:16px;left:0;right:0;display:flex;justify-content:center;gap:12px;}
+  .roundbtn{width:54px;height:54px;border-radius:50%;border:none;background:rgba(20,22,30,.75);
+    color:#fff;font-size:20px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+  .roundbtn.off{background:var(--danger);}
+
+  #receiverWrap{flex:1;position:relative;background:#000;}
+  #recvOverlay{position:absolute;top:10px;left:10px;font-size:12px;background:rgba(0,0,0,.5);
+    padding:6px 10px;border-radius:8px;color:var(--muted);}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="modeSelect">
+    <h1>Kamera HP &rarr; OBS</h1>
+    <p>Pilih mode. Buka mode <b>Kirim</b> di HP yang jadi kamera, dan mode <b>Terima</b> di PC (sebagai Browser Source di OBS).</p>
+    <button class="bigbtn btn-send" onclick="goMode('sender')">📷 Kirim dari HP</button>
+    <button class="bigbtn btn-recv" onclick="goMode('receiver')">🖥️ Terima di OBS</button>
+  </div>
+
+  <!-- MODE PENGIRIM (HP) -->
+  <div id="senderView" class="view hidden">
+    <div class="topbar">
+      <span>Mode: Kirim</span>
+      <span class="status" id="senderStatus">Belum terhubung</span>
+    </div>
+    <div class="form" id="senderForm">
+      <input id="roomInputSend" placeholder="Kode ruangan (samakan dgn OBS), mis: rt07-kamera1">
+      <button onclick="startSending()">Mulai Kirim ke OBS</button>
+    </div>
+    <div id="senderPreviewWrap" class="hidden">
+      <video id="senderVideo" autoplay playsinline muted></video>
+      <div class="controls">
+        <button class="roundbtn" id="micBtn" onclick="toggleMic()">🎤</button>
+        <button class="roundbtn" onclick="switchCamera()">🔄</button>
+        <button class="roundbtn off" onclick="location.reload()">✖</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODE PENERIMA (OBS) -->
+  <div id="receiverView" class="view hidden">
+    <div class="form" id="receiverForm">
+      <input id="roomInputRecv" placeholder="Kode ruangan (samakan dgn HP), mis: rt07-kamera1">
+      <button onclick="startReceiving()">Mulai Terima</button>
+    </div>
+    <div id="receiverWrap" class="hidden">
+      <video id="receiverVideo" autoplay playsinline></video>
+      <div id="recvOverlay">Menunggu kamera...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const qs = new URLSearchParams(location.search);
+let peer, currentStream, currentCall, facingMode = 'environment';
+
+// Konfigurasi jalur koneksi: STUN dulu (buat P2P langsung),
+// TURN jadi cadangan kalau P2P diblokir NAT/firewall (jaringan kantor/kampus, dsb).
+// TURN publik gratis dari Open Relay Project — cukup buat kebutuhan wajar,
+// kalau nanti butuh lebih stabil/berat sebaiknya ganti ke TURN berbayar sendiri.
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    { urls: 'turn:global.relay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:global.relay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:global.relay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+  ]
+};
+
+function goMode(mode){
+  document.getElementById('modeSelect').classList.add('hidden');
+  if(mode === 'sender'){
+    document.getElementById('senderView').classList.remove('hidden');
+  } else {
+    document.getElementById('receiverView').classList.remove('hidden');
+  }
+}
+
+// Auto-jalan lewat URL, contoh untuk OBS Browser Source:
+// kamera-ke-obs.html?mode=receiver&room=rt07-kamera1&auto=1
+window.addEventListener('load', () => {
+  const mode = qs.get('mode');
+  const room = qs.get('room');
+  if(mode === 'receiver'){
+    goMode('receiver');
+    if(room) document.getElementById('roomInputRecv').value = room;
+    if(room && qs.get('auto') === '1') startReceiving();
+  } else if(mode === 'sender'){
+    goMode('sender');
+    if(room) document.getElementById('roomInputSend').value = room;
+  }
+});
+
+// Cek lewat jalur apa koneksi berjalan: langsung (host/srflx) atau relay (TURN)
+function checkConnectionPath(call, labelEl, prefix){
+  if(!call || !call.peerConnection) return;
+  setTimeout(async () => {
+    try{
+      const stats = await call.peerConnection.getStats();
+      let path = 'langsung';
+      stats.forEach(r => {
+        if(r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated){
+          const local = stats.get(r.localCandidateId);
+          if(local && local.candidateType === 'relay') path = 'lewat relay (TURN)';
+        }
+      });
+      labelEl.textContent = prefix + ' — jalur: ' + path;
+    } catch(e){ /* abaikan, tidak semua browser mendukung getStats detail ini */ }
+  }, 2500);
+}
+
+/* ---------------- PENGIRIM (HP) ---------------- */
+async function startSending(){
+  const room = document.getElementById('roomInputSend').value.trim();
+  if(!room){ alert('Isi kode ruangan dulu, samakan dengan yang di OBS.'); return; }
+
+  const statusEl = document.getElementById('senderStatus');
+  statusEl.textContent = 'Meminta izin kamera...';
+
+  try{
+    currentStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facingMode }, width:{ideal:1280}, height:{ideal:720} },
+      audio: true
+    });
+  } catch(e){
+    statusEl.textContent = 'Gagal akses kamera: ' + e.message;
+    statusEl.className = 'status err';
+    return;
+  }
+
+  document.getElementById('senderForm').classList.add('hidden');
+  document.getElementById('senderPreviewWrap').classList.remove('hidden');
+  const localVideo = document.getElementById('senderVideo');
+  localVideo.srcObject = currentStream;
+
+  peer = new Peer(undefined, { debug: 1, config: ICE_CONFIG });
+
+  peer.on('open', () => {
+    statusEl.textContent = 'Menghubungkan ke OBS...';
+    currentCall = peer.call(room, currentStream);
+    currentCall.on('stream', () => {
+      statusEl.textContent = 'Tersambung ke OBS ✔';
+      statusEl.className = 'status ok';
+      checkConnectionPath(currentCall, statusEl, 'Tersambung ke OBS');
+    });
+    currentCall.on('close', () => {
+      statusEl.textContent = 'Terputus dari OBS';
+      statusEl.className = 'status err';
+    });
+    currentCall.on('error', (err) => {
+      statusEl.textContent = 'Error: ' + err;
+      statusEl.className = 'status err';
+    });
+  });
+
+  peer.on('error', (err) => {
+    statusEl.textContent = 'Error koneksi: ' + err.type + ' (pastikan mode Terima sudah aktif dengan kode yang sama)';
+    statusEl.className = 'status err';
+  });
+}
+
+function toggleMic(){
+  if(!currentStream) return;
+  const track = currentStream.getAudioTracks()[0];
+  if(!track) return;
+  track.enabled = !track.enabled;
+  document.getElementById('micBtn').classList.toggle('off', !track.enabled);
+}
+
+async function switchCamera(){
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  try{
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facingMode }, width:{ideal:1280}, height:{ideal:720} },
+      audio: true
+    });
+    const newVideoTrack = newStream.getVideoTracks()[0];
+    document.getElementById('senderVideo').srcObject = newStream;
+
+    if(currentCall && currentCall.peerConnection){
+      const sender = currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+      if(sender) sender.replaceTrack(newVideoTrack);
+    }
+    if(currentStream){ currentStream.getTracks().forEach(t => t.stop()); }
+    currentStream = newStream;
+  } catch(e){
+    alert('Gagal ganti kamera: ' + e.message);
+  }
+}
+
+/* ---------------- PENERIMA (OBS) ---------------- */
+function startReceiving(){
+  const room = document.getElementById('roomInputRecv').value.trim();
+  if(!room){ alert('Isi kode ruangan dulu, samakan dengan yang di HP.'); return; }
+
+  document.getElementById('receiverForm').classList.add('hidden');
+  document.getElementById('receiverWrap').classList.remove('hidden');
+  const overlay = document.getElementById('recvOverlay');
+
+  peer = new Peer(room, { debug: 1, config: ICE_CONFIG });
+
+  peer.on('open', () => {
+    overlay.textContent = 'Siap. Menunggu HP menyambung ke kode: ' + room;
+  });
+
+  peer.on('call', (call) => {
+    overlay.textContent = 'Kamera masuk, menyambungkan...';
+    call.answer(); // tanpa kirim stream balik
+    call.on('stream', (remoteStream) => {
+      document.getElementById('receiverVideo').srcObject = remoteStream;
+      overlay.textContent = 'Live ✔';
+      checkConnectionPath(call, overlay, 'Live');
+      setTimeout(() => { if(overlay.textContent.indexOf('Live') === 0) overlay.style.opacity = '0.15'; }, 4000);
+    });
+    call.on('close', () => {
+      overlay.style.opacity = '1';
+      overlay.textContent = 'Kamera terputus, menunggu lagi...';
+    });
+  });
+
+  peer.on('error', (err) => {
+    overlay.style.opacity = '1';
+    overlay.textContent = 'Error: ' + err.type;
+    if(err.type === 'unavailable-id'){
+      overlay.textContent = 'Kode ruangan ini sedang dipakai tab lain, coba reload.';
+    }
+  });
+}
+</script>
+</body>
+</html>
