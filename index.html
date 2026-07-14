@@ -279,25 +279,54 @@ function toggleMic(){
 }
 
 async function switchCamera(){
-  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  const newFacing = facingMode === 'environment' ? 'user' : 'environment';
+  const oldFacing = facingMode;
+  const oldStream = currentStream;
+
+  // Matikan dulu track kamera yang aktif sekarang. Banyak HP Android
+  // hanya mengizinkan satu kamera aktif dalam satu waktu, jadi kalau
+  // kamera baru diminta sebelum yang lama dilepas, permintaannya bisa ditolak.
+  if(oldStream){ oldStream.getTracks().forEach(t => t.stop()); }
+
   try{
     const newStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: facingMode }, width:{ideal:1280}, height:{ideal:720} },
+      video: { facingMode: { ideal: newFacing }, width:{ideal:1280}, height:{ideal:720} },
       audio: true
     });
-    const newVideoTrack = newStream.getVideoTracks()[0];
-    document.getElementById('senderVideo').srcObject = newStream;
-
-    if(currentCall && currentCall.peerConnection){
-      const sender = currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
-      if(sender) sender.replaceTrack(newVideoTrack);
-    }
-    if(currentStream){ currentStream.getTracks().forEach(t => t.stop()); }
-    currentStream = newStream;
-    setupTrackControls(newVideoTrack);
+    facingMode = newFacing;
+    applyStreamToCall(newStream);
   } catch(e){
-    alert('Gagal ganti kamera: ' + e.message);
+    // Gagal buka kamera yang dituju -> coba balik ke kamera semula
+    // supaya preview tidak macet di layar hitam / mati total.
+    try{
+      const revertStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: oldFacing }, width:{ideal:1280}, height:{ideal:720} },
+        audio: true
+      });
+      facingMode = oldFacing;
+      applyStreamToCall(revertStream);
+      alert('Kamera ' + (newFacing === 'user' ? 'depan' : 'belakang') + ' tidak bisa diakses di HP ini (' + e.name + '). Kembali ke kamera semula.');
+    } catch(e2){
+      alert('Gagal ganti kamera dan gagal kembali ke kamera semula: ' + e2.message + '. Coba tekan tombol ✖ lalu Mulai Kirim ulang.');
+    }
   }
+}
+
+// Terapkan stream baru ke preview + ke koneksi yang sedang berjalan ke OBS
+function applyStreamToCall(newStream){
+  document.getElementById('senderVideo').srcObject = newStream;
+  const newVideoTrack = newStream.getVideoTracks()[0];
+  const newAudioTrack = newStream.getAudioTracks()[0];
+
+  if(currentCall && currentCall.peerConnection){
+    const senders = currentCall.peerConnection.getSenders();
+    const vSender = senders.find(s => s.track && s.track.kind === 'video');
+    const aSender = senders.find(s => s.track && s.track.kind === 'audio');
+    if(vSender && newVideoTrack) vSender.replaceTrack(newVideoTrack);
+    if(aSender && newAudioTrack) aSender.replaceTrack(newAudioTrack);
+  }
+  currentStream = newStream;
+  setupTrackControls(newVideoTrack);
 }
 
 /* ---------------- Kontrol kamera lanjutan ---------------- */
