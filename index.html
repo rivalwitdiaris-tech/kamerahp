@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Kamera HP ke OBS</title>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
@@ -44,12 +44,29 @@
   .form button.secondary{background:#2a2f3d;}
 
   video{width:100%;height:100%;object-fit:cover;background:#000;}
-  #senderPreviewWrap{flex:1;position:relative;background:#000;}
+  #senderPreviewWrap{flex:1;position:relative;background:#000;overflow:hidden;}
   #senderVideo{width:100%;height:100%;object-fit:cover;}
-  .controls{position:absolute;bottom:16px;left:0;right:0;display:flex;justify-content:center;gap:12px;}
-  .roundbtn{width:54px;height:54px;border-radius:50%;border:none;background:rgba(20,22,30,.75);
-    color:#fff;font-size:20px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+
+  /* --- Bar kontrol kamera --- */
+  .ctrlbar{position:absolute;bottom:0;left:0;right:0;
+    padding:10px 8px calc(10px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top, rgba(0,0,0,.8), transparent);
+    display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;}
+  .roundbtn{width:46px;height:46px;border-radius:50%;border:none;background:rgba(20,22,30,.75);
+    color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+    flex-shrink:0;}
   .roundbtn.off{background:var(--danger);}
+  .roundbtn.active{background:var(--accent);}
+  .btngroup{display:flex;align-items:center;background:rgba(20,22,30,.75);border-radius:24px;
+    overflow:hidden;flex-shrink:0;}
+  .btngroup button{width:38px;height:46px;border:none;background:transparent;color:#fff;
+    font-size:15px;cursor:pointer;}
+  .btngroup button.active{background:var(--accent);}
+  .btngroup .label{padding:0 8px;font-size:11px;color:var(--muted);min-width:38px;text-align:center;}
+
+  /* Top-right info kecil saat streaming */
+  .topInfo{position:absolute;top:8px;left:8px;font-size:11px;background:rgba(0,0,0,.5);
+    padding:5px 9px;border-radius:8px;color:var(--muted);z-index:2;}
 
   #receiverWrap{flex:1;position:relative;background:#000;}
   #recvOverlay{position:absolute;top:10px;left:10px;font-size:12px;background:rgba(0,0,0,.5);
@@ -77,11 +94,39 @@
       <button onclick="startSending()">Mulai Kirim ke OBS</button>
     </div>
     <div id="senderPreviewWrap" class="hidden">
+      <span class="topInfo" id="topInfo">Layar tetap menyala</span>
       <video id="senderVideo" autoplay playsinline muted></video>
-      <div class="controls">
-        <button class="roundbtn" id="micBtn" onclick="toggleMic()">🎤</button>
-        <button class="roundbtn" onclick="switchCamera()">🔄</button>
-        <button class="roundbtn off" onclick="location.reload()">✖</button>
+      <div class="ctrlbar" id="ctrlbar">
+        <button class="roundbtn hidden" id="torchBtn" onclick="toggleTorch()" title="Flashlight">🔦</button>
+
+        <div class="btngroup hidden" id="zoomGroup" title="Zoom">
+          <button onclick="stepZoom(-1)">−</button>
+          <span class="label" id="zoomLabel">1.0x</span>
+          <button onclick="stepZoom(1)">+</button>
+        </div>
+
+        <div class="btngroup hidden" id="focusGroup" title="Fokus">
+          <button id="focusModeBtn" onclick="toggleFocusMode()">AF</button>
+          <button class="hidden" id="focusMinusBtn" onclick="stepFocus(-1)">−</button>
+          <button class="hidden" id="focusPlusBtn" onclick="stepFocus(1)">+</button>
+        </div>
+
+        <div class="btngroup hidden" id="wbGroup" title="White Balance">
+          <button id="wbModeBtn" onclick="toggleWbMode()">AWB</button>
+          <button class="hidden" id="wbMinusBtn" onclick="stepWb(-1)">−</button>
+          <button class="hidden" id="wbPlusBtn" onclick="stepWb(1)">+</button>
+        </div>
+
+        <div class="btngroup" id="orientGroup" title="Orientasi layar">
+          <button id="orientPortraitBtn" onclick="lockOrientationMode('portrait')">📱</button>
+          <button id="orientLandscapeBtn" onclick="lockOrientationMode('landscape')">🖥️</button>
+          <button id="orientFreeBtn" onclick="lockOrientationMode(null)">🔓</button>
+        </div>
+
+        <button class="roundbtn" id="fsBtn" onclick="toggleFullscreen()" title="Layar penuh">⛶</button>
+        <button class="roundbtn" id="micBtn" onclick="toggleMic()" title="Mikrofon">🎤</button>
+        <button class="roundbtn" onclick="switchCamera()" title="Ganti kamera">🔄</button>
+        <button class="roundbtn off" onclick="stopSending()" title="Berhenti">✖</button>
       </div>
     </div>
   </div>
@@ -103,6 +148,8 @@
 <script>
 const qs = new URLSearchParams(location.search);
 let peer, currentStream, currentCall, facingMode = 'environment';
+let currentVideoTrack = null, wakeLock = null;
+let torchOn = false, zoomVal = 1, focusManual = false, focusVal = 0, wbManual = false, wbVal = 4000;
 
 // Konfigurasi jalur koneksi: STUN dulu (buat P2P langsung),
 // TURN jadi cadangan kalau P2P diblokir NAT/firewall (jaringan kantor/kampus, dsb).
@@ -184,6 +231,11 @@ async function startSending(){
   const localVideo = document.getElementById('senderVideo');
   localVideo.srcObject = currentStream;
 
+  setupTrackControls(currentStream.getVideoTracks()[0]);
+  requestWakeLock();
+  // Coba masuk layar penuh otomatis (masih dalam konteks tap tombol Mulai Kirim)
+  enterFullscreen();
+
   peer = new Peer(undefined, { debug: 1, config: ICE_CONFIG });
 
   peer.on('open', () => {
@@ -210,6 +262,14 @@ async function startSending(){
   });
 }
 
+function stopSending(){
+  try{ if(wakeLock){ wakeLock.release(); wakeLock = null; } }catch(e){}
+  try{ if(currentStream) currentStream.getTracks().forEach(t => t.stop()); }catch(e){}
+  try{ if(currentCall) currentCall.close(); }catch(e){}
+  try{ if(peer) peer.destroy(); }catch(e){}
+  location.reload();
+}
+
 function toggleMic(){
   if(!currentStream) return;
   const track = currentStream.getAudioTracks()[0];
@@ -234,10 +294,161 @@ async function switchCamera(){
     }
     if(currentStream){ currentStream.getTracks().forEach(t => t.stop()); }
     currentStream = newStream;
+    setupTrackControls(newVideoTrack);
   } catch(e){
     alert('Gagal ganti kamera: ' + e.message);
   }
 }
+
+/* ---------------- Kontrol kamera lanjutan ---------------- */
+// Deteksi kemampuan kamera & tampilkan/sembunyikan tombol sesuai dukungan device
+function setupTrackControls(track){
+  currentVideoTrack = track;
+  torchOn = false; focusManual = false; wbManual = false;
+  const caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
+
+  const torchBtn = document.getElementById('torchBtn');
+  torchBtn.classList.toggle('hidden', !caps.torch);
+  torchBtn.classList.remove('active');
+
+  const zoomGroup = document.getElementById('zoomGroup');
+  if(caps.zoom){
+    zoomGroup.classList.remove('hidden');
+    zoomVal = (track.getSettings && track.getSettings().zoom) || caps.zoom.min || 1;
+    updateZoomLabel();
+  } else {
+    zoomGroup.classList.add('hidden');
+  }
+
+  const focusGroup = document.getElementById('focusGroup');
+  const focusModeBtn = document.getElementById('focusModeBtn');
+  if(caps.focusDistance && caps.focusMode && caps.focusMode.includes('manual')){
+    focusGroup.classList.remove('hidden');
+    focusModeBtn.textContent = 'AF';
+    document.getElementById('focusMinusBtn').classList.add('hidden');
+    document.getElementById('focusPlusBtn').classList.add('hidden');
+    focusVal = caps.focusDistance.min;
+  } else {
+    focusGroup.classList.add('hidden');
+  }
+
+  const wbGroup = document.getElementById('wbGroup');
+  const wbModeBtn = document.getElementById('wbModeBtn');
+  if(caps.colorTemperature && caps.whiteBalanceMode && caps.whiteBalanceMode.includes('manual')){
+    wbGroup.classList.remove('hidden');
+    wbModeBtn.textContent = 'AWB';
+    document.getElementById('wbMinusBtn').classList.add('hidden');
+    document.getElementById('wbPlusBtn').classList.add('hidden');
+    wbVal = caps.colorTemperature.min;
+  } else {
+    wbGroup.classList.add('hidden');
+  }
+}
+
+function applyAdvanced(constraint){
+  if(!currentVideoTrack) return;
+  currentVideoTrack.applyConstraints({ advanced: [constraint] }).catch(e => console.warn('Constraint tidak didukung:', constraint, e));
+}
+
+function toggleTorch(){
+  torchOn = !torchOn;
+  document.getElementById('torchBtn').classList.toggle('active', torchOn);
+  applyAdvanced({ torch: torchOn });
+}
+
+function updateZoomLabel(){
+  document.getElementById('zoomLabel').textContent = zoomVal.toFixed(1) + 'x';
+}
+function stepZoom(dir){
+  if(!currentVideoTrack || !currentVideoTrack.getCapabilities) return;
+  const caps = currentVideoTrack.getCapabilities();
+  if(!caps.zoom) return;
+  const step = caps.zoom.step || 0.5;
+  zoomVal = Math.min(caps.zoom.max, Math.max(caps.zoom.min, zoomVal + dir * step));
+  updateZoomLabel();
+  applyAdvanced({ zoom: zoomVal });
+}
+
+function toggleFocusMode(){
+  focusManual = !focusManual;
+  document.getElementById('focusModeBtn').textContent = focusManual ? 'MF' : 'AF';
+  document.getElementById('focusMinusBtn').classList.toggle('hidden', !focusManual);
+  document.getElementById('focusPlusBtn').classList.toggle('hidden', !focusManual);
+  applyAdvanced({ focusMode: focusManual ? 'manual' : 'continuous', focusDistance: focusManual ? focusVal : undefined });
+}
+function stepFocus(dir){
+  if(!currentVideoTrack || !currentVideoTrack.getCapabilities) return;
+  const caps = currentVideoTrack.getCapabilities();
+  if(!caps.focusDistance) return;
+  const step = caps.focusDistance.step || ((caps.focusDistance.max - caps.focusDistance.min) / 20);
+  focusVal = Math.min(caps.focusDistance.max, Math.max(caps.focusDistance.min, focusVal + dir * step));
+  applyAdvanced({ focusMode: 'manual', focusDistance: focusVal });
+}
+
+function toggleWbMode(){
+  wbManual = !wbManual;
+  document.getElementById('wbModeBtn').textContent = wbManual ? 'MWB' : 'AWB';
+  document.getElementById('wbMinusBtn').classList.toggle('hidden', !wbManual);
+  document.getElementById('wbPlusBtn').classList.toggle('hidden', !wbManual);
+  applyAdvanced({ whiteBalanceMode: wbManual ? 'manual' : 'continuous', colorTemperature: wbManual ? wbVal : undefined });
+}
+function stepWb(dir){
+  if(!currentVideoTrack || !currentVideoTrack.getCapabilities) return;
+  const caps = currentVideoTrack.getCapabilities();
+  if(!caps.colorTemperature) return;
+  const step = caps.colorTemperature.step || 100;
+  wbVal = Math.min(caps.colorTemperature.max, Math.max(caps.colorTemperature.min, wbVal + dir * step));
+  applyAdvanced({ whiteBalanceMode: 'manual', colorTemperature: wbVal });
+}
+
+/* Layar penuh */
+async function enterFullscreen(){
+  try{
+    if(document.documentElement.requestFullscreen){ await document.documentElement.requestFullscreen(); return; }
+    if(document.documentElement.webkitRequestFullscreen){ document.documentElement.webkitRequestFullscreen(); return; }
+  }catch(e){ /* lanjut ke fallback iOS di bawah */ }
+  try{
+    const v = document.getElementById('senderVideo');
+    if(v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+  }catch(e2){ /* device tidak mendukung, abaikan */ }
+}
+function toggleFullscreen(){
+  if(document.fullscreenElement){ document.exitFullscreen(); }
+  else { enterFullscreen(); }
+}
+
+/* Kunci orientasi layar (Android Chrome; iOS Safari umumnya tidak mendukung) */
+async function lockOrientationMode(mode){
+  document.querySelectorAll('#orientGroup button').forEach(b => b.classList.remove('active'));
+  try{
+    if(mode === null){
+      if(screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+      document.getElementById('orientFreeBtn').classList.add('active');
+      return;
+    }
+    if(screen.orientation && screen.orientation.lock){
+      await screen.orientation.lock(mode);
+      document.getElementById(mode === 'portrait' ? 'orientPortraitBtn' : 'orientLandscapeBtn').classList.add('active');
+    } else {
+      throw new Error('tidak didukung');
+    }
+  }catch(e){
+    alert('Kunci orientasi tidak didukung di browser/HP ini (biasanya perlu Android + Chrome, dan mode layar penuh aktif). Silakan putar HP secara manual.');
+  }
+}
+
+/* Layar tetap menyala selama kamera aktif */
+async function requestWakeLock(){
+  if('wakeLock' in navigator){
+    try{ wakeLock = await navigator.wakeLock.request('screen'); }
+    catch(e){ console.warn('Wake lock gagal:', e); }
+  }
+}
+document.addEventListener('visibilitychange', async () => {
+  if(document.visibilityState === 'visible' && currentStream && !wakeLock){
+    requestWakeLock();
+  }
+});
 
 /* ---------------- PENERIMA (OBS) ---------------- */
 function startReceiving(){
